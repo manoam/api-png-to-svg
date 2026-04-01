@@ -37,9 +37,25 @@ const uploadBatch = multer({
   },
 });
 
+// --- Redimensionner si trop grand (pour la performance) ---
+async function prepareForAnalysis(buffer) {
+  const metadata = await sharp(buffer).metadata();
+  const MAX_PIXELS = 500000; // 500k pixels max pour l'analyse
+  const totalPixels = metadata.width * metadata.height;
+
+  if (totalPixels > MAX_PIXELS) {
+    const scale = Math.sqrt(MAX_PIXELS / totalPixels);
+    const newWidth = Math.round(metadata.width * scale);
+    return sharp(buffer).resize(newWidth).png().toBuffer();
+  }
+  return buffer;
+}
+
 // --- Analyse de complexité d'une image ---
 async function analyzeComplexity(buffer) {
-  const image = sharp(buffer);
+  const originalMeta = await sharp(buffer).metadata();
+  const analysisBuffer = await prepareForAnalysis(buffer);
+  const image = sharp(analysisBuffer);
   const metadata = await image.metadata();
   const { width, height, channels, hasAlpha } = metadata;
   const totalPixels = width * height;
@@ -134,8 +150,8 @@ async function analyzeComplexity(buffer) {
   else quality = "non_convertissable";
 
   return {
-    width,
-    height,
+    width: originalMeta.width,
+    height: originalMeta.height,
     hasAlpha: !!hasAlpha,
     uniqueColors,
     gradientRatio: Math.round(gradientRatio * 100) / 100,
@@ -148,7 +164,9 @@ async function analyzeComplexity(buffer) {
 
 // --- Conversion PNG → SVG (multi-couleurs avec posterize) ---
 function convertToSvg(buffer, options = {}) {
+  const TIMEOUT = 60000; // 60 secondes max
   return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("Conversion timeout (60s)")), TIMEOUT);
     const potraceOptions = {
       turdSize: options.turdSize ?? 2,
       threshold: options.threshold ?? potrace.Potrace.THRESHOLD_AUTO,
@@ -167,11 +185,13 @@ function convertToSvg(buffer, options = {}) {
       };
 
       potrace.posterize(buffer, posterizeOptions, (err, svg) => {
+        clearTimeout(timer);
         if (err) return reject(err);
         resolve(svg);
       });
     } else {
       potrace.trace(buffer, potraceOptions, (err, svg) => {
+        clearTimeout(timer);
         if (err) return reject(err);
         resolve(svg);
       });
@@ -204,7 +224,10 @@ app.post("/convert", upload.single("image"), async (req, res) => {
     }
 
     // Analyse de complexité
+    console.log(`[convert] Image reçue: ${req.file.originalname} (${req.file.size} octets)`);
+    const startTime = Date.now();
     const analysis = await analyzeComplexity(req.file.buffer);
+    console.log(`[convert] Analyse: ${Date.now() - startTime}ms — score=${analysis.score}, couleurs=${analysis.uniqueColors}`);
 
     // Si non convertissable et pas de forçage
     if (!analysis.convertible && req.query.force !== "true") {
@@ -215,10 +238,14 @@ app.post("/convert", upload.single("image"), async (req, res) => {
       });
     }
 
-    // Préparer l'image pour potrace
-    const processedBuffer = await sharp(req.file.buffer)
-      .png()
-      .toBuffer();
+    // Préparer l'image pour potrace (redimensionner si trop grande)
+    const meta = await sharp(req.file.buffer).metadata();
+    let sharpPipeline = sharp(req.file.buffer);
+    const MAX_TRACE_WIDTH = 2000;
+    if (meta.width > MAX_TRACE_WIDTH) {
+      sharpPipeline = sharpPipeline.resize(MAX_TRACE_WIDTH);
+    }
+    const processedBuffer = await sharpPipeline.png().toBuffer();
 
     // Choisir automatiquement le mode selon la complexité
     const usePosterize = req.query.posterize === "true" || analysis.uniqueColors > 5;
@@ -231,6 +258,7 @@ app.post("/convert", upload.single("image"), async (req, res) => {
       threshold: req.query.threshold ? Number(req.query.threshold) : undefined,
       color: req.query.color || undefined,
     });
+    console.log(`[convert] Terminé en ${Date.now() - startTime}ms total`);
 
     // Retourner JSON avec SVG + analyse, ou juste le SVG
     if (req.query.format === "json") {
@@ -279,7 +307,10 @@ app.post("/batch", uploadBatch.array("images", 50), async (req, res) => {
             };
           }
 
-          const processedBuffer = await sharp(file.buffer).png().toBuffer();
+          const fileMeta = await sharp(file.buffer).metadata();
+          let pipeline = sharp(file.buffer);
+          if (fileMeta.width > 2000) pipeline = pipeline.resize(2000);
+          const processedBuffer = await pipeline.png().toBuffer();
 
           const usePosterize = analysis.uniqueColors > 5;
           const steps = Math.min(Math.max(2, Math.ceil(analysis.uniqueColors / 10)), 6);
