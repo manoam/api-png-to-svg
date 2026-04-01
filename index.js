@@ -247,9 +247,9 @@ app.post("/convert", upload.single("image"), async (req, res) => {
     }
     const processedBuffer = await sharpPipeline.png().toBuffer();
 
-    // Choisir automatiquement le mode selon la complexité
-    const usePosterize = req.query.posterize === "true" || analysis.uniqueColors > 5;
-    const steps = req.query.steps ? Number(req.query.steps) : Math.min(Math.max(2, Math.ceil(analysis.uniqueColors / 10)), 6);
+    // Posterize uniquement si demandé explicitement (sinon trace = rapide)
+    const usePosterize = req.query.posterize === "true";
+    const steps = req.query.steps ? Number(req.query.steps) : Math.min(Math.max(2, Math.ceil(analysis.uniqueColors / 10)), 4);
 
     const svg = await convertToSvg(processedBuffer, {
       posterize: usePosterize,
@@ -312,8 +312,8 @@ app.post("/batch", uploadBatch.array("images", 50), async (req, res) => {
           if (fileMeta.width > 2000) pipeline = pipeline.resize(2000);
           const processedBuffer = await pipeline.png().toBuffer();
 
-          const usePosterize = analysis.uniqueColors > 5;
-          const steps = Math.min(Math.max(2, Math.ceil(analysis.uniqueColors / 10)), 6);
+          const usePosterize = false; // trace par défaut, plus rapide
+          const steps = Math.min(Math.max(2, Math.ceil(analysis.uniqueColors / 10)), 4);
 
           const svg = await convertToSvg(processedBuffer, {
             posterize: usePosterize,
