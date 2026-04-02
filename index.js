@@ -162,41 +162,96 @@ async function analyzeComplexity(buffer) {
   };
 }
 
-// --- Conversion PNG → SVG (multi-couleurs avec posterize) ---
-function convertToSvg(buffer, options = {}) {
-  const TIMEOUT = 60000; // 60 secondes max
+// --- Trace simple (N&B) ---
+function traceBW(buffer, options = {}) {
+  const TIMEOUT = 60000;
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("Conversion timeout (60s)")), TIMEOUT);
-    const potraceOptions = {
+    potrace.trace(buffer, {
       turdSize: options.turdSize ?? 2,
       threshold: options.threshold ?? potrace.Potrace.THRESHOLD_AUTO,
-    };
-
-    if (options.color) {
-      potraceOptions.color = options.color;
-    }
-
-    // Si multi-couleurs demandé, utiliser posterize
-    if (options.posterize) {
-      const posterizeOptions = {
-        ...potraceOptions,
-        steps: options.steps ?? 4,
-        fillStrategy: potrace.Potrace.TURNPOLICY_MAJORITY,
-      };
-
-      potrace.posterize(buffer, posterizeOptions, (err, svg) => {
-        clearTimeout(timer);
-        if (err) return reject(err);
-        resolve(svg);
-      });
-    } else {
-      potrace.trace(buffer, potraceOptions, (err, svg) => {
-        clearTimeout(timer);
-        if (err) return reject(err);
-        resolve(svg);
-      });
-    }
+      color: options.color || "black",
+    }, (err, svg) => {
+      clearTimeout(timer);
+      if (err) return reject(err);
+      resolve(svg);
+    });
   });
+}
+
+// --- Conversion couleur : quantifier les couleurs dominantes puis tracer chacune ---
+async function traceColor(buffer, options = {}) {
+  const maxColors = options.steps || 4;
+  const turdSize = options.turdSize ?? 2;
+
+  // Lire les pixels bruts en RGBA
+  const raw = await sharp(buffer).ensureAlpha().raw().toBuffer();
+  const meta = await sharp(buffer).metadata();
+  const width = meta.width;
+  const height = meta.height;
+  const channels = 4;
+
+  // Quantifier manuellement : regrouper par blocs de 32 pour réduire les couleurs
+  const quantStep = 32;
+  const colorMap = new Map();
+  for (let i = 0; i < raw.length; i += channels) {
+    if (raw[i + 3] < 128) continue;
+    const r = Math.round(raw[i] / quantStep) * quantStep;
+    const g = Math.round(raw[i + 1] / quantStep) * quantStep;
+    const b = Math.round(raw[i + 2] / quantStep) * quantStep;
+    const key = `${r},${g},${b}`;
+    if (!colorMap.has(key)) colorMap.set(key, { r, g, b, count: 0 });
+    colorMap.get(key).count++;
+  }
+
+  // Garder les N couleurs les plus fréquentes (minimum 8 pour ne pas perdre de couleurs)
+  const colors = [...colorMap.values()]
+    .sort((a, b) => b.count - a.count)
+    .slice(0, Math.max(maxColors, 8));
+
+  // Index rapide pour retrouver les couleurs
+  const colorIndex = new Map();
+  colors.forEach((c, i) => colorIndex.set(`${c.r},${c.g},${c.b}`, i));
+
+  // Assigner chaque pixel à sa couleur quantifiée
+  const assigned = new Uint8Array(width * height);
+  for (let i = 0; i < raw.length; i += channels) {
+    const px = i / channels;
+    if (raw[i + 3] < 128) { assigned[px] = 255; continue; }
+    const r = Math.round(raw[i] / quantStep) * quantStep;
+    const g = Math.round(raw[i + 1] / quantStep) * quantStep;
+    const b = Math.round(raw[i + 2] / quantStep) * quantStep;
+    const idx = colorIndex.get(`${r},${g},${b}`);
+    assigned[px] = idx !== undefined ? idx : 255;
+  }
+
+  // Pour chaque couleur, créer un masque et tracer
+  const svgPaths = [];
+  for (let ci = 0; ci < colors.length; ci++) {
+    const color = colors[ci];
+    const mask = Buffer.alloc(width * height);
+    for (let p = 0; p < assigned.length; p++) {
+      mask[p] = assigned[p] === ci ? 0 : 255;
+    }
+
+    const maskPng = await sharp(mask, { raw: { width, height, channels: 1 } }).png().toBuffer();
+    const hex = `#${Math.min(255, color.r).toString(16).padStart(2, "0")}${Math.min(255, color.g).toString(16).padStart(2, "0")}${Math.min(255, color.b).toString(16).padStart(2, "0")}`;
+
+    const pathSvg = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("Trace timeout")), 30000);
+      potrace.trace(maskPng, { turdSize, color: hex }, (err, svg) => {
+        clearTimeout(timer);
+        if (err) return reject(err);
+        resolve(svg);
+      });
+    });
+
+    const pathMatch = pathSvg.match(/<path[^>]*\/>/g);
+    if (pathMatch) svgPaths.push(...pathMatch);
+  }
+
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" version="1.1">\n${svgPaths.map(p => `\t${p}`).join("\n")}\n</svg>`;
+  return svg;
 }
 
 // POST /analyze — analyse la complexité sans convertir
@@ -238,26 +293,32 @@ app.post("/convert", upload.single("image"), async (req, res) => {
       });
     }
 
-    // Préparer l'image pour potrace (redimensionner si trop grande)
+    // mode=bw pour noir/blanc, sinon couleur par défaut
+    const mode = req.query.mode || "color";
+    const isBW = mode === "bw";
+
+    // Préparer l'image pour potrace (redimensionner pour la perf)
     const meta = await sharp(req.file.buffer).metadata();
     let sharpPipeline = sharp(req.file.buffer);
-    const MAX_TRACE_WIDTH = 2000;
+    const MAX_TRACE_WIDTH = isBW ? 2000 : 800; // plus petit pour posterize (couleur)
     if (meta.width > MAX_TRACE_WIDTH) {
       sharpPipeline = sharpPipeline.resize(MAX_TRACE_WIDTH);
     }
     const processedBuffer = await sharpPipeline.png().toBuffer();
 
-    // Posterize uniquement si demandé explicitement (sinon trace = rapide)
-    const usePosterize = req.query.posterize === "true";
-    const steps = req.query.steps ? Number(req.query.steps) : Math.min(Math.max(2, Math.ceil(analysis.uniqueColors / 10)), 4);
+    const turdSize = req.query.turdSize ? Number(req.query.turdSize) : 2;
+    const steps = req.query.steps ? Number(req.query.steps) : Math.min(Math.max(2, Math.ceil(analysis.uniqueColors / 8)), 4);
 
-    const svg = await convertToSvg(processedBuffer, {
-      posterize: usePosterize,
-      steps,
-      turdSize: req.query.turdSize ? Number(req.query.turdSize) : 2,
-      threshold: req.query.threshold ? Number(req.query.threshold) : undefined,
-      color: req.query.color || undefined,
-    });
+    let svg;
+    if (isBW) {
+      svg = await traceBW(processedBuffer, {
+        turdSize,
+        threshold: req.query.threshold ? Number(req.query.threshold) : undefined,
+        color: req.query.color || undefined,
+      });
+    } else {
+      svg = await traceColor(processedBuffer, { steps, turdSize });
+    }
     console.log(`[convert] Terminé en ${Date.now() - startTime}ms total`);
 
     // Retourner JSON avec SVG + analyse, ou juste le SVG
@@ -309,17 +370,11 @@ app.post("/batch", uploadBatch.array("images", 50), async (req, res) => {
 
           const fileMeta = await sharp(file.buffer).metadata();
           let pipeline = sharp(file.buffer);
-          if (fileMeta.width > 2000) pipeline = pipeline.resize(2000);
+          if (fileMeta.width > 800) pipeline = pipeline.resize(800);
           const processedBuffer = await pipeline.png().toBuffer();
 
-          const usePosterize = false; // trace par défaut, plus rapide
-          const steps = Math.min(Math.max(2, Math.ceil(analysis.uniqueColors / 10)), 4);
-
-          const svg = await convertToSvg(processedBuffer, {
-            posterize: usePosterize,
-            steps,
-            turdSize: 2,
-          });
+          const steps = Math.min(Math.max(2, Math.ceil(analysis.uniqueColors / 8)), 4);
+          const svg = await traceColor(processedBuffer, { steps, turdSize: 2 });
 
           return {
             filename: file.originalname,
@@ -362,11 +417,10 @@ app.get("/", (req, res) => {
         body: "multipart/form-data avec champ 'image'",
         query: {
           format: "'json' pour recevoir SVG + analyse en JSON (défaut: SVG brut)",
+          mode: "'color' (défaut) ou 'bw' pour noir et blanc",
           threshold: "Seuil de détection (0-255, défaut: auto)",
-          color: "Couleur du tracé",
           turdSize: "Suppression des petits artefacts (défaut: 2)",
-          posterize: "'true' pour forcer le mode multi-couleurs",
-          steps: "Nombre de niveaux de couleur pour posterize (2-6, défaut: auto)",
+          steps: "Nombre de niveaux de couleur (2-4, défaut: auto)",
           force: "'true' pour forcer la conversion même si l'image est trop complexe",
           download: "'true' pour télécharger le fichier",
         },
