@@ -284,14 +284,15 @@ app.post("/convert", upload.single("image"), async (req, res) => {
     const analysis = await analyzeComplexity(req.file.buffer);
     console.log(`[convert] Analyse: ${Date.now() - startTime}ms — score=${analysis.score}, couleurs=${analysis.uniqueColors}`);
 
-    // Lire les paramètres depuis le body (form-data)
-    const mode = req.body.mode || "color";
-    const format = req.body.format || "json";
-    const force = req.body.force === "true";
-    const turdSize = req.body.turdSize ? Number(req.body.turdSize) : 2;
-    const steps = req.body.steps ? Number(req.body.steps) : Math.min(Math.max(2, Math.ceil(analysis.uniqueColors / 8)), 4);
-    const threshold = req.body.threshold ? Number(req.body.threshold) : undefined;
-    const download = req.body.download === "true";
+    // Lire les paramètres depuis le body (form-data) ou query string (fallback)
+    console.log(`[convert] body:`, req.body, `query:`, req.query);
+    const mode = req.body.mode || req.query.mode || "color";
+    const format = req.body.format || req.query.format || "json";
+    const force = (req.body.force || req.query.force) === "true";
+    const turdSize = Number(req.body.turdSize || req.query.turdSize) || 2;
+    const steps = Number(req.body.steps || req.query.steps) || Math.min(Math.max(2, Math.ceil(analysis.uniqueColors / 8)), 4);
+    const threshold = Number(req.body.threshold || req.query.threshold) || undefined;
+    const download = (req.body.download || req.query.download) === "true";
     const isBW = mode === "bw";
 
     // Si non convertissable et pas de forçage
