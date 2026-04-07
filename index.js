@@ -284,45 +284,44 @@ app.post("/convert", upload.single("image"), async (req, res) => {
     const analysis = await analyzeComplexity(req.file.buffer);
     console.log(`[convert] Analyse: ${Date.now() - startTime}ms — score=${analysis.score}, couleurs=${analysis.uniqueColors}`);
 
+    // Lire les paramètres depuis le body (form-data)
+    const mode = req.body.mode || "color";
+    const format = req.body.format || "json";
+    const force = req.body.force === "true";
+    const turdSize = req.body.turdSize ? Number(req.body.turdSize) : 2;
+    const steps = req.body.steps ? Number(req.body.steps) : Math.min(Math.max(2, Math.ceil(analysis.uniqueColors / 8)), 4);
+    const threshold = req.body.threshold ? Number(req.body.threshold) : undefined;
+    const download = req.body.download === "true";
+    const isBW = mode === "bw";
+
     // Si non convertissable et pas de forçage
-    if (!analysis.convertible && req.query.force !== "true") {
+    if (!analysis.convertible && !force) {
       return res.status(422).json({
         error: "Image trop complexe pour une conversion SVG fidèle",
         analysis,
-        hint: "Ajoutez ?force=true pour forcer la conversion",
+        hint: "Ajoutez force=true dans le body pour forcer la conversion",
       });
     }
-
-    // mode=bw pour noir/blanc, sinon couleur par défaut
-    const mode = req.query.mode || "color";
-    const isBW = mode === "bw";
 
     // Préparer l'image pour potrace (redimensionner pour la perf)
     const meta = await sharp(req.file.buffer).metadata();
     let sharpPipeline = sharp(req.file.buffer);
-    const MAX_TRACE_WIDTH = isBW ? 2000 : 800; // plus petit pour posterize (couleur)
+    const MAX_TRACE_WIDTH = isBW ? 2000 : 800;
     if (meta.width > MAX_TRACE_WIDTH) {
       sharpPipeline = sharpPipeline.resize(MAX_TRACE_WIDTH);
     }
     const processedBuffer = await sharpPipeline.png().toBuffer();
 
-    const turdSize = req.query.turdSize ? Number(req.query.turdSize) : 2;
-    const steps = req.query.steps ? Number(req.query.steps) : Math.min(Math.max(2, Math.ceil(analysis.uniqueColors / 8)), 4);
-
     let svg;
     if (isBW) {
-      svg = await traceBW(processedBuffer, {
-        turdSize,
-        threshold: req.query.threshold ? Number(req.query.threshold) : undefined,
-        color: req.query.color || undefined,
-      });
+      svg = await traceBW(processedBuffer, { turdSize, threshold });
     } else {
       svg = await traceColor(processedBuffer, { steps, turdSize });
     }
     console.log(`[convert] Terminé en ${Date.now() - startTime}ms total`);
 
     // Retourner JSON avec SVG + analyse, ou juste le SVG
-    if (req.query.format === "json") {
+    if (format === "json") {
       return res.json({
         filename: req.file.originalname,
         analysis,
@@ -331,12 +330,11 @@ app.post("/convert", upload.single("image"), async (req, res) => {
       });
     }
 
-    if (req.query.download === "true") {
+    if (download) {
       const filename = path.parse(req.file.originalname).name + ".svg";
       res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
     }
 
-    // Ajouter l'analyse dans des headers custom
     res.setHeader("X-Conversion-Score", analysis.score);
     res.setHeader("X-Conversion-Quality", analysis.quality);
     res.setHeader("X-Unique-Colors", analysis.uniqueColors);
@@ -414,25 +412,23 @@ app.get("/", (req, res) => {
     endpoints: {
       "POST /convert": {
         description: "Convertit une image en SVG avec analyse de fiabilité",
-        body: "multipart/form-data avec champ 'image'",
-        query: {
-          format: "'json' pour recevoir SVG + analyse en JSON (défaut: SVG brut)",
-          mode: "'color' (défaut) ou 'bw' pour noir et blanc",
-          threshold: "Seuil de détection (0-255, défaut: auto)",
-          turdSize: "Suppression des petits artefacts (défaut: 2)",
-          steps: "Nombre de niveaux de couleur (2-4, défaut: auto)",
-          force: "'true' pour forcer la conversion même si l'image est trop complexe",
-          download: "'true' pour télécharger le fichier",
-        },
-        response_headers: {
-          "X-Conversion-Score": "Score de fiabilité (0-100)",
-          "X-Conversion-Quality": "excellent | bon | moyen | faible | non_convertissable",
-          "X-Unique-Colors": "Nombre de couleurs détectées",
+        body: {
+          type: "multipart/form-data",
+          fields: {
+            image: "(fichier) Image à convertir — requis",
+            mode: "'color' (défaut) ou 'bw' pour noir et blanc",
+            format: "'json' (défaut) pour SVG + analyse, ou 'svg' pour le SVG brut",
+            threshold: "Seuil de détection 0-255 (défaut: auto, uniquement en mode bw)",
+            turdSize: "Suppression des petits artefacts (défaut: 2)",
+            steps: "Nombre de niveaux de couleur 2-8 (défaut: auto)",
+            force: "'true' pour forcer la conversion même si image trop complexe",
+            download: "'true' pour télécharger le fichier SVG",
+          },
         },
       },
       "POST /analyze": {
         description: "Analyse la complexité d'une image sans la convertir",
-        body: "multipart/form-data avec champ 'image'",
+        body: "multipart/form-data avec champ 'image' (fichier)",
         response: {
           score: "Score de fiabilité (0-100)",
           quality: "excellent | bon | moyen | faible | non_convertissable",
@@ -444,8 +440,8 @@ app.get("/", (req, res) => {
       },
       "POST /batch": {
         description: "Convertit plusieurs images (max 50) avec analyse automatique",
-        body: "multipart/form-data avec champ 'images' (multiple)",
-        response: "JSON avec summary + résultats par image",
+        body: "multipart/form-data avec champ 'images' (fichiers multiples)",
+        response: "JSON avec summary + résultats par image (couleur par défaut)",
       },
     },
   });
