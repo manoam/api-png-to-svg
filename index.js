@@ -191,41 +191,53 @@ async function traceColor(buffer, options = {}) {
   const height = meta.height;
   const channels = 4;
 
-  // Quantifier manuellement : regrouper par blocs de 32 pour réduire les couleurs
+  // Quantifier : regrouper par blocs de 32, mais garder la vraie couleur moyenne
   const quantStep = 32;
   const colorMap = new Map();
   for (let i = 0; i < raw.length; i += channels) {
     if (raw[i + 3] < 128) continue;
-    const r = Math.round(raw[i] / quantStep) * quantStep;
-    const g = Math.round(raw[i + 1] / quantStep) * quantStep;
-    const b = Math.round(raw[i + 2] / quantStep) * quantStep;
-    const key = `${r},${g},${b}`;
-    if (!colorMap.has(key)) colorMap.set(key, { r, g, b, count: 0 });
-    colorMap.get(key).count++;
+    const qr = Math.round(raw[i] / quantStep) * quantStep;
+    const qg = Math.round(raw[i + 1] / quantStep) * quantStep;
+    const qb = Math.round(raw[i + 2] / quantStep) * quantStep;
+    const key = `${qr},${qg},${qb}`;
+    if (!colorMap.has(key)) colorMap.set(key, { qr, qg, qb, sumR: 0, sumG: 0, sumB: 0, count: 0 });
+    const entry = colorMap.get(key);
+    entry.sumR += raw[i];
+    entry.sumG += raw[i + 1];
+    entry.sumB += raw[i + 2];
+    entry.count++;
   }
 
-  // Garder les N couleurs les plus fréquentes (minimum 8 pour ne pas perdre de couleurs)
-  const colors = [...colorMap.values()]
+  // Calculer la couleur moyenne réelle de chaque groupe
+  const groups = [...colorMap.values()]
     .sort((a, b) => b.count - a.count)
     .slice(0, Math.max(maxColors, 8));
 
-  // Index rapide pour retrouver les couleurs
+  const colors = groups.map(g => ({
+    qr: g.qr, qg: g.qg, qb: g.qb,
+    r: Math.round(g.sumR / g.count),
+    g: Math.round(g.sumG / g.count),
+    b: Math.round(g.sumB / g.count),
+    count: g.count,
+  }));
+
+  // Index rapide pour retrouver les couleurs par clé quantifiée
   const colorIndex = new Map();
-  colors.forEach((c, i) => colorIndex.set(`${c.r},${c.g},${c.b}`, i));
+  colors.forEach((c, i) => colorIndex.set(`${c.qr},${c.qg},${c.qb}`, i));
 
   // Assigner chaque pixel à sa couleur quantifiée
   const assigned = new Uint8Array(width * height);
   for (let i = 0; i < raw.length; i += channels) {
     const px = i / channels;
     if (raw[i + 3] < 128) { assigned[px] = 255; continue; }
-    const r = Math.round(raw[i] / quantStep) * quantStep;
-    const g = Math.round(raw[i + 1] / quantStep) * quantStep;
-    const b = Math.round(raw[i + 2] / quantStep) * quantStep;
-    const idx = colorIndex.get(`${r},${g},${b}`);
+    const qr = Math.round(raw[i] / quantStep) * quantStep;
+    const qg = Math.round(raw[i + 1] / quantStep) * quantStep;
+    const qb = Math.round(raw[i + 2] / quantStep) * quantStep;
+    const idx = colorIndex.get(`${qr},${qg},${qb}`);
     assigned[px] = idx !== undefined ? idx : 255;
   }
 
-  // Pour chaque couleur, créer un masque et tracer
+  // Pour chaque couleur, créer un masque et tracer avec la vraie couleur moyenne
   const svgPaths = [];
   for (let ci = 0; ci < colors.length; ci++) {
     const color = colors[ci];
@@ -235,7 +247,7 @@ async function traceColor(buffer, options = {}) {
     }
 
     const maskPng = await sharp(mask, { raw: { width, height, channels: 1 } }).png().toBuffer();
-    const hex = `#${Math.min(255, color.r).toString(16).padStart(2, "0")}${Math.min(255, color.g).toString(16).padStart(2, "0")}${Math.min(255, color.b).toString(16).padStart(2, "0")}`;
+    const hex = `#${color.r.toString(16).padStart(2, "0")}${color.g.toString(16).padStart(2, "0")}${color.b.toString(16).padStart(2, "0")}`;
 
     const pathSvg = await new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error("Trace timeout")), 30000);
