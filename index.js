@@ -279,13 +279,9 @@ app.post("/convert", upload.single("image"), async (req, res) => {
     }
 
     // Analyse de complexité
-    console.log(`[convert] Image reçue: ${req.file.originalname} (${req.file.size} octets)`);
-    const startTime = Date.now();
     const analysis = await analyzeComplexity(req.file.buffer);
-    console.log(`[convert] Analyse: ${Date.now() - startTime}ms — score=${analysis.score}, couleurs=${analysis.uniqueColors}`);
 
     // Lire les paramètres depuis le body (form-data) ou query string (fallback)
-    console.log(`[convert] body:`, req.body, `query:`, req.query);
     const mode = req.body.mode || req.query.mode || "color";
     const format = req.body.format || req.query.format || "json";
     const force = (req.body.force || req.query.force) === "true";
@@ -319,8 +315,6 @@ app.post("/convert", upload.single("image"), async (req, res) => {
     } else {
       svg = await traceColor(processedBuffer, { steps, turdSize });
     }
-    console.log(`[convert] Terminé en ${Date.now() - startTime}ms total`);
-
     // Retourner JSON avec SVG + analyse, ou juste le SVG
     if (format === "json") {
       return res.json({
