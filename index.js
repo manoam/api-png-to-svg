@@ -273,11 +273,22 @@ async function traceExact(buffer, options = {}) {
 
   const raw = await sharp(buffer).ensureAlpha().raw().toBuffer();
   const meta = await sharp(buffer).metadata();
+  const data = new Uint8ClampedArray(raw);
+
+  // Remplacer les pixels transparents par du blanc (sinon imagetracerjs les trace en noir)
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i + 3] < 128) {
+      data[i] = 255;     // R
+      data[i + 1] = 255; // G
+      data[i + 2] = 255; // B
+      data[i + 3] = 255; // A
+    }
+  }
 
   const imgd = {
     width: meta.width,
     height: meta.height,
-    data: new Uint8ClampedArray(raw),
+    data,
   };
 
   const svg = ImageTracer.imagedataToSVG(imgd, {
@@ -291,7 +302,10 @@ async function traceExact(buffer, options = {}) {
     scale: 1,
   });
 
-  return svg;
+  // Supprimer les paths blancs (fond) du SVG
+  const cleaned = svg.replace(/<path[^>]*fill="rgb\(255,255,255\)"[^>]*\/>/g, "");
+
+  return cleaned;
 }
 
 // POST /analyze — analyse la complexité sans convertir
