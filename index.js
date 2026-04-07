@@ -2,6 +2,7 @@ const express = require("express");
 const multer = require("multer");
 const sharp = require("sharp");
 const potrace = require("potrace");
+const ImageTracer = require("imagetracerjs");
 const cors = require("cors");
 const path = require("path");
 
@@ -266,6 +267,33 @@ async function traceColor(buffer, options = {}) {
   return svg;
 }
 
+// --- Conversion exacte (vraies couleurs) avec imagetracerjs ---
+async function traceExact(buffer, options = {}) {
+  const numberOfColors = options.steps || 16;
+
+  const raw = await sharp(buffer).ensureAlpha().raw().toBuffer();
+  const meta = await sharp(buffer).metadata();
+
+  const imgd = {
+    width: meta.width,
+    height: meta.height,
+    data: new Uint8ClampedArray(raw),
+  };
+
+  const svg = ImageTracer.imagedataToSVG(imgd, {
+    numberofcolors: numberOfColors,
+    colorsampling: 2,
+    strokewidth: 0,
+    pathomit: 4,
+    roundcoords: 2,
+    ltres: 0.5,
+    qtres: 0.5,
+    scale: 1,
+  });
+
+  return svg;
+}
+
 // POST /analyze — analyse la complexité sans convertir
 app.post("/analyze", upload.single("image"), async (req, res) => {
   try {
@@ -301,8 +329,6 @@ app.post("/convert", upload.single("image"), async (req, res) => {
     const steps = Number(req.body.steps || req.query.steps) || Math.min(Math.max(2, Math.ceil(analysis.uniqueColors / 8)), 4);
     const threshold = Number(req.body.threshold || req.query.threshold) || undefined;
     const download = (req.body.download || req.query.download) === "true";
-    const isBW = mode === "bw";
-
     // Si non convertissable et pas de forçage
     if (!analysis.convertible && !force) {
       return res.status(422).json({
@@ -312,18 +338,20 @@ app.post("/convert", upload.single("image"), async (req, res) => {
       });
     }
 
-    // Préparer l'image pour potrace (redimensionner pour la perf)
+    // Préparer l'image (redimensionner pour la perf)
     const meta = await sharp(req.file.buffer).metadata();
     let sharpPipeline = sharp(req.file.buffer);
-    const MAX_TRACE_WIDTH = isBW ? 2000 : 800;
-    if (meta.width > MAX_TRACE_WIDTH) {
-      sharpPipeline = sharpPipeline.resize(MAX_TRACE_WIDTH);
+    const MAX_WIDTH = mode === "bw" ? 2000 : mode === "exact" ? 1000 : 800;
+    if (meta.width > MAX_WIDTH) {
+      sharpPipeline = sharpPipeline.resize(MAX_WIDTH);
     }
     const processedBuffer = await sharpPipeline.png().toBuffer();
 
     let svg;
-    if (isBW) {
+    if (mode === "bw") {
       svg = await traceBW(processedBuffer, { turdSize, threshold });
+    } else if (mode === "exact") {
+      svg = await traceExact(processedBuffer, { steps: Number(req.body.steps || req.query.steps) || 16 });
     } else {
       svg = await traceColor(processedBuffer, { steps, turdSize });
     }
@@ -423,11 +451,11 @@ app.get("/", (req, res) => {
           type: "multipart/form-data",
           fields: {
             image: "(fichier) Image à convertir — requis",
-            mode: "'color' (défaut) ou 'bw' pour noir et blanc",
+            mode: "'color' (défaut), 'exact' (vraies couleurs), ou 'bw' (noir et blanc)",
             format: "'json' (défaut) pour SVG + analyse, ou 'svg' pour le SVG brut",
             threshold: "Seuil de détection 0-255 (défaut: auto, uniquement en mode bw)",
-            turdSize: "Suppression des petits artefacts (défaut: 2)",
-            steps: "Nombre de niveaux de couleur 2-8 (défaut: auto)",
+            turdSize: "Suppression des petits artefacts (défaut: 2, modes color/bw)",
+            steps: "Nombre de couleurs: 2-8 (color), 2-64 (exact, défaut: 16)",
             force: "'true' pour forcer la conversion même si image trop complexe",
             download: "'true' pour télécharger le fichier SVG",
           },
