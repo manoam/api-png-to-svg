@@ -1,5 +1,4 @@
 import io
-import tempfile
 import os
 from typing import Optional
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
@@ -143,41 +142,28 @@ def convert_with_vtracer(
         new_height = int(processed.height * ratio)
         processed = processed.resize((max_width, new_height), Image.LANCZOS)
 
-    # Sauvegarder dans un fichier temporaire (vtracer a besoin d'un fichier)
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_in:
-        processed.save(tmp_in, format="PNG")
-        tmp_in_path = tmp_in.name
+    # Convertir en bytes RGBA bruts
+    raw_bytes = processed.tobytes()
+    width, height = processed.size
+    colormode = "binary" if mode == "bw" else "color"
 
-    tmp_out_path = tmp_in_path.replace(".png", ".svg")
+    svg = vtracer.convert_raw_image_to_svg(
+        raw_bytes,
+        img_width=width,
+        img_height=height,
+        colormode=colormode,
+        hierarchical="stacked",
+        filter_speckle=filter_speckle,
+        color_precision=color_precision,
+        layer_difference=16,
+        corner_threshold=corner_threshold,
+        length_threshold=4.0,
+        max_iterations=10,
+        splice_threshold=45,
+        path_precision=path_precision,
+    )
 
-    try:
-        colormode = "binary" if mode == "bw" else "color"
-
-        vtracer.convert_image_to_svg_py(
-            input_path=tmp_in_path,
-            output_path=tmp_out_path,
-            colormode=colormode,
-            hierarchical="stacked",
-            filter_speckle=filter_speckle,
-            color_precision=color_precision,
-            layer_difference=16,
-            corner_threshold=corner_threshold,
-            length_threshold=4.0,
-            max_iterations=10,
-            splice_threshold=45,
-            path_precision=path_precision,
-        )
-
-        with open(tmp_out_path, "r", encoding="utf-8") as f:
-            svg = f.read()
-
-        return svg
-
-    finally:
-        if os.path.exists(tmp_in_path):
-            os.unlink(tmp_in_path)
-        if os.path.exists(tmp_out_path):
-            os.unlink(tmp_out_path)
+    return svg
 
 
 async def read_image(file: UploadFile) -> Image.Image:
@@ -230,14 +216,18 @@ async def analyze(image: UploadFile = File(...)):
 @app.post("/convert")
 async def convert(
     image: UploadFile = File(...),
-    mode: str = Form("color"),
-    format: str = Form("json"),
-    color_precision: int = Form(8),
-    filter_speckle: int = Form(4),
-    force: str = Form("false"),
-    download: str = Form("false"),
+    mode: Optional[str] = Form("color"),
+    format: Optional[str] = Form("json"),
+    color_precision: Optional[int] = Form(8),
+    filter_speckle: Optional[int] = Form(4),
+    force: Optional[str] = Form("false"),
+    download: Optional[str] = Form("false"),
 ):
-    img = await read_image(image)
+    try:
+        img = await read_image(image)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Impossible de lire l'image: {str(e)}")
+
     analysis = analyze_complexity(img)
 
     if not analysis["convertible"] and force != "true":
@@ -250,12 +240,15 @@ async def convert(
             },
         )
 
-    svg = convert_with_vtracer(
-        img,
-        mode=mode,
-        color_precision=color_precision,
-        filter_speckle=filter_speckle,
-    )
+    try:
+        svg = convert_with_vtracer(
+            img,
+            mode=mode or "color",
+            color_precision=color_precision or 8,
+            filter_speckle=filter_speckle or 4,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur conversion: {str(e)}")
 
     if format == "json":
         return {
