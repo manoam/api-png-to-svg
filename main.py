@@ -142,28 +142,40 @@ def convert_with_vtracer(
         new_height = int(processed.height * ratio)
         processed = processed.resize((max_width, new_height), Image.LANCZOS)
 
-    # Convertir en bytes RGBA bruts
-    raw_bytes = processed.tobytes()
-    width, height = processed.size
+    # Sauvegarder en PNG temporaire
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_in:
+        processed.save(tmp_in, format="PNG")
+        tmp_in_path = tmp_in.name
+
+    tmp_out_path = tmp_in_path.replace(".png", ".svg")
     colormode = "binary" if mode == "bw" else "color"
 
-    svg = vtracer.convert_raw_image_to_svg(
-        raw_bytes,
-        img_width=width,
-        img_height=height,
-        colormode=colormode,
-        hierarchical="stacked",
-        filter_speckle=filter_speckle,
-        color_precision=color_precision,
-        layer_difference=16,
-        corner_threshold=corner_threshold,
-        length_threshold=4.0,
-        max_iterations=10,
-        splice_threshold=45,
-        path_precision=path_precision,
-    )
+    try:
+        vtracer.convert_image_to_svg_py(
+            tmp_in_path,
+            tmp_out_path,
+            colormode=colormode,
+            hierarchical="stacked",
+            filter_speckle=filter_speckle,
+            color_precision=color_precision,
+            layer_difference=16,
+            corner_threshold=corner_threshold,
+            length_threshold=4.0,
+            max_iterations=10,
+            splice_threshold=45,
+            path_precision=path_precision,
+        )
 
-    return svg
+        with open(tmp_out_path, "r", encoding="utf-8") as f:
+            svg = f.read()
+
+        return svg
+    finally:
+        if os.path.exists(tmp_in_path):
+            os.unlink(tmp_in_path)
+        if os.path.exists(tmp_out_path):
+            os.unlink(tmp_out_path)
 
 
 async def read_image(file: UploadFile) -> Image.Image:
