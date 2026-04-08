@@ -1,0 +1,6 @@
+fastapi==0.115.12
+uvicorn==0.34.2
+python-multipart==0.0.20
+Pillow==11.2.1
+vtracer==0.6.10
+numpy==2.2.4
