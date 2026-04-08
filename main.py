@@ -1,5 +1,6 @@
 import io
 import os
+import base64
 from typing import Optional
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -119,6 +120,27 @@ def analyze_complexity(img: Image.Image) -> dict:
     }
 
 
+def embed_png_as_svg(img: Image.Image) -> str:
+    """Encode le PNG en base64 dans un SVG — copie exacte de l'image."""
+    rgba = img.convert("RGBA")
+    width, height = rgba.size
+
+    buf = io.BytesIO()
+    rgba.save(buf, format="PNG")
+    b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+
+    svg = (
+        f'<svg xmlns="http://www.w3.org/2000/svg" '
+        f'xmlns:xlink="http://www.w3.org/1999/xlink" '
+        f'width="{width}" height="{height}" '
+        f'viewBox="0 0 {width} {height}">\n'
+        f'  <image width="{width}" height="{height}" '
+        f'href="data:image/png;base64,{b64}" />\n'
+        f'</svg>'
+    )
+    return svg
+
+
 def convert_with_vtracer(
     img: Image.Image,
     mode: str = "color",
@@ -202,7 +224,7 @@ def info():
                     "type": "multipart/form-data",
                     "fields": {
                         "image": "(fichier) Image à convertir — requis",
-                        "mode": "'color' (défaut) ou 'bw' pour noir et blanc",
+                        "mode": "'color' (défaut), 'bw' (noir et blanc), 'exact' (PNG encodé en SVG, copie parfaite)",
                         "format": "'json' (défaut) pour SVG + analyse, ou 'svg' pour le SVG brut",
                         "color_precision": "Nombre de couleurs 1-12 (défaut: 8, plus = plus fidèle)",
                         "filter_speckle": "Supprimer les petits artefacts (défaut: 4)",
@@ -258,12 +280,16 @@ async def convert(
         )
 
     try:
-        svg = convert_with_vtracer(
-            img,
-            mode=mode or "color",
-            color_precision=color_precision or 8,
-            filter_speckle=filter_speckle or 4,
-        )
+        actual_mode = mode or "color"
+        if actual_mode == "exact":
+            svg = embed_png_as_svg(img)
+        else:
+            svg = convert_with_vtracer(
+                img,
+                mode=actual_mode,
+                color_precision=color_precision or 8,
+                filter_speckle=filter_speckle or 4,
+            )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erreur conversion: {str(e)}")
 
