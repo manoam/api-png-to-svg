@@ -172,6 +172,11 @@ async def read_image(file: UploadFile) -> Image.Image:
     return Image.open(io.BytesIO(contents))
 
 
+@app.get("/debug")
+def debug():
+    return {"vtracer_methods": [m for m in dir(vtracer) if not m.startswith("_")]}
+
+
 @app.get("/")
 def info():
     return {
