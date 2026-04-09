@@ -310,6 +310,7 @@ async def convert(
 
     actual_engine = (engine or "vtracer").strip().lower()
     actual_mode = (mode or "color").strip().lower()
+    print(f"[convert] engine param raw={engine!r} actual={actual_engine!r} mode={actual_mode!r}")
 
     try:
         if actual_engine == "exact":
@@ -333,7 +334,8 @@ async def convert(
     if format == "json":
         return {
             "filename": image.filename,
-            "engine": actual_engine,
+            "engine_received": engine,
+            "engine_used": actual_engine,
             "analysis": analysis,
             "svg": svg,
             "svgSize": len(svg.encode("utf-8")),
