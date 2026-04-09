@@ -310,7 +310,10 @@ async def convert(
 
     actual_engine = (engine or "vtracer").strip().lower()
     actual_mode = (mode or "color").strip().lower()
-    print(f"[convert] engine param raw={engine!r} actual={actual_engine!r} mode={actual_mode!r}")
+
+    # mode=exact → embed PNG en base64 dans SVG
+    if actual_mode == "exact":
+        actual_engine = "exact"
 
     try:
         if actual_engine == "exact":
@@ -334,8 +337,7 @@ async def convert(
     if format == "json":
         return {
             "filename": image.filename,
-            "engine_received": engine,
-            "engine_used": actual_engine,
+            "engine": actual_engine,
             "analysis": analysis,
             "svg": svg,
             "svgSize": len(svg.encode("utf-8")),
