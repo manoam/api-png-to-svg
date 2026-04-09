@@ -1,6 +1,8 @@
 import io
 import os
 import base64
+import subprocess
+import tempfile
 from typing import Optional
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,7 +11,7 @@ from PIL import Image
 import numpy as np
 import vtracer
 
-app = FastAPI(title="PNG to SVG API", version="3.0.0")
+app = FastAPI(title="PNG to SVG API", version="4.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -24,18 +26,15 @@ def analyze_complexity(img: Image.Image) -> dict:
     width, height = img.size
     total_pixels = width * height
 
-    # Convertir en RGBA
     rgba = img.convert("RGBA")
     data = np.array(rgba)
 
-    # Échantillonner si trop grand
     if total_pixels > 50000:
         step = int(np.sqrt(total_pixels / 50000))
         sampled = data[::step, ::step]
     else:
         sampled = data
 
-    # Pixels non transparents
     opaque_mask = sampled[:, :, 3] >= 10
     opaque_pixels = sampled[opaque_mask]
 
@@ -46,12 +45,10 @@ def analyze_complexity(img: Image.Image) -> dict:
             "score": 0, "quality": "non_convertissable", "convertible": False,
         }
 
-    # Compter les couleurs uniques (quantifiées par blocs de 16)
     quantized = opaque_pixels[:, :3] // 16
     unique_colors = len(set(map(tuple, quantized.tolist())))
 
-    # Détecter les dégradés
-    flat = data[:, :, 0].astype(np.int16)  # canal rouge pour simplifier
+    flat = data[:, :, 0].astype(np.int16)
     if flat.shape[0] > 1 and flat.shape[1] > 1:
         diff_h = np.abs(np.diff(flat, axis=1))
         diff_v = np.abs(np.diff(flat, axis=0))
@@ -63,11 +60,9 @@ def analyze_complexity(img: Image.Image) -> dict:
     else:
         gradient_ratio = 0.0
 
-    # Ratio de transparence
     has_alpha = img.mode == "RGBA" or "transparency" in img.info
     transparent_ratio = round(float(1 - np.sum(opaque_mask) / sampled[:, :, 3].size), 2)
 
-    # Score de fiabilité
     score = 100
     if unique_colors > 500:
         score -= 40
@@ -108,64 +103,23 @@ def analyze_complexity(img: Image.Image) -> dict:
         quality = "non_convertissable"
 
     return {
-        "width": width,
-        "height": height,
-        "hasAlpha": has_alpha,
-        "uniqueColors": unique_colors,
-        "gradientRatio": gradient_ratio,
-        "transparentRatio": transparent_ratio,
-        "score": score,
-        "quality": quality,
-        "convertible": convertible,
+        "width": width, "height": height, "hasAlpha": has_alpha,
+        "uniqueColors": unique_colors, "gradientRatio": gradient_ratio,
+        "transparentRatio": transparent_ratio, "score": score,
+        "quality": quality, "convertible": convertible,
     }
 
 
-def embed_png_as_svg(img: Image.Image) -> str:
-    """Encode le PNG en base64 dans un SVG — copie exacte de l'image."""
-    rgba = img.convert("RGBA")
-    width, height = rgba.size
+# --- Moteur 1 : vtracer (Rust) ---
+def convert_vtracer(img: Image.Image, color_precision: int = 8,
+                    filter_speckle: int = 4, mode: str = "color") -> str:
+    processed = img.convert("L").convert("RGBA") if mode == "bw" else img.convert("RGBA")
 
-    buf = io.BytesIO()
-    rgba.save(buf, format="PNG")
-    b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-
-    svg = (
-        f'<svg xmlns="http://www.w3.org/2000/svg" '
-        f'xmlns:xlink="http://www.w3.org/1999/xlink" '
-        f'width="{width}" height="{height}" '
-        f'viewBox="0 0 {width} {height}">\n'
-        f'  <image width="{width}" height="{height}" '
-        f'href="data:image/png;base64,{b64}" />\n'
-        f'</svg>'
-    )
-    return svg
-
-
-def convert_with_vtracer(
-    img: Image.Image,
-    mode: str = "color",
-    color_precision: int = 8,
-    filter_speckle: int = 4,
-    corner_threshold: int = 60,
-    path_precision: int = 3,
-) -> str:
-    """Convertit une image en SVG avec vtracer."""
-
-    # Préparer l'image selon le mode
-    if mode == "bw":
-        processed = img.convert("L").convert("RGBA")
-    else:
-        processed = img.convert("RGBA")
-
-    # Redimensionner si trop grand
     max_width = 2000 if mode == "bw" else 1200
     if processed.width > max_width:
         ratio = max_width / processed.width
-        new_height = int(processed.height * ratio)
-        processed = processed.resize((max_width, new_height), Image.LANCZOS)
+        processed = processed.resize((max_width, int(processed.height * ratio)), Image.LANCZOS)
 
-    # Sauvegarder en PNG temporaire
-    import tempfile
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_in:
         processed.save(tmp_in, format="PNG")
         tmp_in_path = tmp_in.name
@@ -175,71 +129,145 @@ def convert_with_vtracer(
 
     try:
         vtracer.convert_image_to_svg_py(
-            tmp_in_path,
-            tmp_out_path,
-            colormode=colormode,
-            hierarchical="stacked",
-            filter_speckle=filter_speckle,
-            color_precision=color_precision,
-            layer_difference=16,
-            corner_threshold=corner_threshold,
-            length_threshold=4.0,
-            max_iterations=10,
-            splice_threshold=45,
-            path_precision=path_precision,
+            tmp_in_path, tmp_out_path,
+            colormode=colormode, hierarchical="stacked",
+            filter_speckle=filter_speckle, color_precision=color_precision,
+            layer_difference=16, corner_threshold=60,
+            length_threshold=4.0, max_iterations=10,
+            splice_threshold=45, path_precision=3,
         )
+        with open(tmp_out_path, "r", encoding="utf-8") as f:
+            return f.read()
+    finally:
+        for p in [tmp_in_path, tmp_out_path]:
+            if os.path.exists(p):
+                os.unlink(p)
+
+
+# --- Moteur 2 : AutoTrace (C) ---
+def convert_autotrace(img: Image.Image, color_count: int = 16,
+                      mode: str = "color") -> str:
+    processed = img.convert("L").convert("RGBA") if mode == "bw" else img.convert("RGBA")
+
+    max_width = 1500
+    if processed.width > max_width:
+        ratio = max_width / processed.width
+        processed = processed.resize((max_width, int(processed.height * ratio)), Image.LANCZOS)
+
+    # AutoTrace ne gère pas bien la transparence, on remplace par du blanc
+    bg = Image.new("RGBA", processed.size, (255, 255, 255, 255))
+    bg.paste(processed, mask=processed.split()[3])
+    rgb = bg.convert("RGB")
+
+    with tempfile.NamedTemporaryFile(suffix=".ppm", delete=False) as tmp_in:
+        rgb.save(tmp_in, format="PPM")
+        tmp_in_path = tmp_in.name
+
+    tmp_out_path = tmp_in_path.replace(".ppm", ".svg")
+
+    try:
+        cmd = [
+            "autotrace",
+            "-output-format", "svg",
+            "-output-file", tmp_out_path,
+            "-color-count", str(color_count),
+        ]
+
+        if mode == "bw":
+            cmd.extend(["-color-count", "2"])
+
+        cmd.append(tmp_in_path)
+
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=120,
+        )
+
+        if result.returncode != 0:
+            raise RuntimeError(f"AutoTrace error: {result.stderr}")
 
         with open(tmp_out_path, "r", encoding="utf-8") as f:
             svg = f.read()
 
+        # Supprimer les rectangles blancs de fond
+        import re
+        svg = re.sub(
+            r'<rect[^>]*fill\s*=\s*["\'](?:#fff(?:fff)?|white|rgb\(255,\s*255,\s*255\))["\'][^>]*/?>',
+            '', svg, flags=re.IGNORECASE
+        )
+
         return svg
     finally:
-        if os.path.exists(tmp_in_path):
-            os.unlink(tmp_in_path)
-        if os.path.exists(tmp_out_path):
-            os.unlink(tmp_out_path)
+        for p in [tmp_in_path, tmp_out_path]:
+            if os.path.exists(p):
+                os.unlink(p)
+
+
+# --- Moteur 3 : embed exact (base64) ---
+def embed_png_as_svg(img: Image.Image) -> str:
+    rgba = img.convert("RGBA")
+    width, height = rgba.size
+
+    buf = io.BytesIO()
+    rgba.save(buf, format="PNG")
+    b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" '
+        f'xmlns:xlink="http://www.w3.org/1999/xlink" '
+        f'width="{width}" height="{height}" '
+        f'viewBox="0 0 {width} {height}">\n'
+        f'  <image width="{width}" height="{height}" '
+        f'href="data:image/png;base64,{b64}" />\n'
+        f'</svg>'
+    )
 
 
 async def read_image(file: UploadFile) -> Image.Image:
-    """Lit un fichier uploadé et retourne une image PIL."""
     contents = await file.read()
     return Image.open(io.BytesIO(contents))
 
 
-@app.get("/debug")
-def debug():
-    return {"vtracer_methods": [m for m in dir(vtracer) if not m.startswith("_")]}
+# --- Vérifier les moteurs disponibles ---
+def get_available_engines():
+    engines = ["vtracer", "exact"]
+    try:
+        result = subprocess.run(["autotrace", "--version"], capture_output=True, timeout=5)
+        engines.append("autotrace")
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return engines
 
 
 @app.get("/")
 def info():
     return {
         "name": "PNG to SVG API",
-        "version": "3.0.0",
-        "engine": "vtracer (Rust)",
+        "version": "4.0.0",
+        "engines": get_available_engines(),
         "endpoints": {
             "POST /convert": {
-                "description": "Convertit une image en SVG avec analyse de fiabilité",
+                "description": "Convertit une image en SVG",
                 "body": {
                     "type": "multipart/form-data",
                     "fields": {
                         "image": "(fichier) Image à convertir — requis",
-                        "mode": "'color' (défaut), 'bw' (noir et blanc), 'exact' (PNG encodé en SVG, copie parfaite)",
-                        "format": "'json' (défaut) pour SVG + analyse, ou 'svg' pour le SVG brut",
-                        "color_precision": "Nombre de couleurs 1-12 (défaut: 8, plus = plus fidèle)",
-                        "filter_speckle": "Supprimer les petits artefacts (défaut: 4)",
-                        "force": "'true' pour forcer la conversion même si image trop complexe",
-                        "download": "'true' pour télécharger le fichier SVG",
+                        "engine": "'vtracer' (défaut), 'autotrace', ou 'exact' (PNG base64 dans SVG)",
+                        "mode": "'color' (défaut) ou 'bw' pour noir et blanc",
+                        "format": "'json' (défaut) ou 'svg' pour le SVG brut",
+                        "color_precision": "vtracer: 1-12 (défaut: 8) | autotrace: nombre de couleurs (défaut: 16)",
+                        "filter_speckle": "vtracer: supprime artefacts (défaut: 4)",
+                        "force": "'true' pour forcer si image trop complexe",
+                        "download": "'true' pour télécharger le fichier",
                     },
                 },
             },
             "POST /analyze": {
-                "description": "Analyse la complexité d'une image sans la convertir",
-                "body": "multipart/form-data avec champ 'image' (fichier)",
+                "description": "Analyse la complexité d'une image",
+                "body": "multipart/form-data avec champ 'image'",
             },
             "POST /batch": {
                 "description": "Convertit plusieurs images (max 50)",
-                "body": "multipart/form-data avec champ 'images' (fichiers multiples)",
+                "body": "multipart/form-data avec champ 'images'",
             },
         },
     }
@@ -255,9 +283,10 @@ async def analyze(image: UploadFile = File(...)):
 @app.post("/convert")
 async def convert(
     image: UploadFile = File(...),
+    engine: Optional[str] = Form("vtracer"),
     mode: Optional[str] = Form("color"),
     format: Optional[str] = Form("json"),
-    color_precision: Optional[int] = Form(8),
+    color_precision: Optional[int] = Form(None),
     filter_speckle: Optional[int] = Form(4),
     force: Optional[str] = Form("false"),
     download: Optional[str] = Form("false"),
@@ -279,23 +308,32 @@ async def convert(
             },
         )
 
+    actual_engine = engine or "vtracer"
+    actual_mode = mode or "color"
+
     try:
-        actual_mode = mode or "color"
-        if actual_mode == "exact":
+        if actual_engine == "exact":
             svg = embed_png_as_svg(img)
-        else:
-            svg = convert_with_vtracer(
+        elif actual_engine == "autotrace":
+            svg = convert_autotrace(
                 img,
+                color_count=color_precision or 16,
                 mode=actual_mode,
+            )
+        else:  # vtracer (défaut)
+            svg = convert_vtracer(
+                img,
                 color_precision=color_precision or 8,
                 filter_speckle=filter_speckle or 4,
+                mode=actual_mode,
             )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erreur conversion: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Erreur conversion ({actual_engine}): {str(e)}")
 
     if format == "json":
         return {
             "filename": image.filename,
+            "engine": actual_engine,
             "analysis": analysis,
             "svg": svg,
             "svgSize": len(svg.encode("utf-8")),
@@ -304,6 +342,7 @@ async def convert(
     headers = {
         "X-Conversion-Score": str(analysis["score"]),
         "X-Conversion-Quality": analysis["quality"],
+        "X-Engine": actual_engine,
     }
 
     if download == "true":
@@ -333,7 +372,7 @@ async def batch(images: list[UploadFile] = File(...)):
                 })
                 continue
 
-            svg = convert_with_vtracer(img)
+            svg = convert_vtracer(img)
 
             results.append({
                 "filename": file.filename,
