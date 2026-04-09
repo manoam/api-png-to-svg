@@ -308,8 +308,8 @@ async def convert(
             },
         )
 
-    actual_engine = engine or "vtracer"
-    actual_mode = mode or "color"
+    actual_engine = (engine or "vtracer").strip().lower()
+    actual_mode = (mode or "color").strip().lower()
 
     try:
         if actual_engine == "exact":
