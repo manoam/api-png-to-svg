@@ -10,6 +10,7 @@ from fastapi.responses import Response, JSONResponse
 from PIL import Image
 import numpy as np
 import vtracer
+from vectorizer import vectorize, vectorize_bw
 
 app = FastAPI(title="PNG to SVG API", version="4.0.0")
 
@@ -251,7 +252,7 @@ def info():
                     "type": "multipart/form-data",
                     "fields": {
                         "image": "(fichier) Image à convertir — requis",
-                        "engine": "'vtracer' (défaut), 'autotrace', ou 'exact' (PNG base64 dans SVG)",
+                        "engine": "'vtracer' (défaut), 'smart' (détection dégradés), ou 'exact' (PNG base64 dans SVG)",
                         "mode": "'color' (défaut) ou 'bw' pour noir et blanc",
                         "format": "'json' (défaut) ou 'svg' pour le SVG brut",
                         "color_precision": "vtracer: 1-12 (défaut: 8) | autotrace: nombre de couleurs (défaut: 16)",
@@ -318,6 +319,15 @@ async def convert(
     try:
         if actual_engine == "exact":
             svg = embed_png_as_svg(img)
+        elif actual_engine == "smart":
+            if actual_mode == "bw":
+                svg = vectorize_bw(img, min_area=filter_speckle or 4)
+            else:
+                svg = vectorize(
+                    img,
+                    num_colors=color_precision or 16,
+                    min_area=filter_speckle or 4,
+                )
         elif actual_engine == "autotrace":
             svg = convert_autotrace(
                 img,
